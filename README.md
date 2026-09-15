@@ -114,7 +114,11 @@ Devolve `{"status": "ok"}` — usado pelo `HEALTHCHECK` do Dockerfile.
 
 ## Docker (correr no home server)
 
+### Opção A — Docker Compose na linha de comandos
+
 ```bash
+git clone <url-deste-repo>
+cd Scrap-falshcore
 docker compose up -d --build
 ```
 
@@ -129,7 +133,74 @@ curl -X POST http://localhost:8000/scrape \
   -d '{"league_url": "https://www.flashscore.pt/futebol/portugal/liga-portugal/", "markets": ["1x2"]}'
 ```
 
-Notas:
+Ver o estado/resultado do job:
+
+```bash
+curl http://localhost:8000/jobs/<job_id>
+```
+
+Outros comandos úteis:
+
+```bash
+docker compose logs -f          # acompanhar logs
+docker compose down             # parar e remover o container
+docker compose up -d --build    # reconstruir depois de alterares código
+```
+
+### Opção B — Portainer (Stacks)
+
+O Portainer chama "stack" a um `docker-compose.yml` gerido pela sua UI.
+Há duas formas de o apontar para este projeto:
+
+**B1. Via repositório Git (recomendado — o Portainer faz o build sozinho)**
+
+1. *Stacks* → *Add stack*.
+2. Dá um nome (ex. `flashscore-odds`).
+3. Em *Build method*, escolhe **Repository**.
+4. *Repository URL*: o URL deste repositório Git.
+5. *Repository reference*: o branch a usar (ex. `main` ou o branch em produção).
+6. *Compose path*: `docker-compose.yml`.
+7. Se o repositório for privado, ativa *Authentication* e usa um
+   Personal Access Token do GitHub (não a tua password).
+8. *Deploy the stack* — o Portainer clona o repo, corre o build a partir
+   do `Dockerfile` e sobe o serviço na porta `8000` do host.
+
+Para atualizar depois de um `git push` com alterações, volta à stack e
+usa *Pull and redeploy* (ou *Update the stack*, consoante a versão do
+Portainer).
+
+**B2. Via Web editor (sem ligar o Portainer ao Git)**
+
+O *Web editor* do Portainer só recebe o texto do `docker-compose.yml` —
+não tem acesso ao `Dockerfile` nem ao código, por isso `build: .` não
+funciona aqui. É preciso publicar a imagem já construída num registry
+primeiro:
+
+1. Na tua máquina (com Docker a funcionar):
+   ```bash
+   docker build -t <teu-utilizador>/flashscore-odds-scraper:latest .
+   docker push <teu-utilizador>/flashscore-odds-scraper:latest
+   ```
+   (Docker Hub, GHCR, ou outro registry acessível pelo teu home server.)
+2. No Portainer: *Stacks* → *Add stack* → **Web editor**.
+3. Cola o compose, mas troca `build: .` por essa imagem:
+   ```yaml
+   services:
+     flashscore-odds:
+       image: <teu-utilizador>/flashscore-odds-scraper:latest
+       restart: unless-stopped
+       ports:
+         - "8000:8000"
+       mem_limit: 1g
+       shm_size: "1gb"
+   ```
+4. *Deploy the stack*.
+
+Para atualizar depois de mudares código, repete o `build` + `push` e no
+Portainer faz *Pull and redeploy* (ou recria a stack) para puxar a
+imagem nova.
+
+### Notas gerais sobre o Docker
 
 - **Não consegui testar o `docker build` nem o `docker compose up`**
   neste ambiente — o daemon Docker aqui não arranca (falta de
@@ -140,16 +211,17 @@ Notas:
   e a API (`api.py`) foi testada a correr fora de Docker com pedidos
   HTTP reais (`/health`, `/scrape`, `/jobs/{id}`) — só falhou a parte de
   rede para o flashscore.pt, que é a mesma limitação de rede descrita
-  acima. Corre `docker compose up -d --build` na tua máquina e avisa-me
-  se der algum erro de build.
+  acima. Corre `docker compose up -d --build` (ou faz o deploy via
+  Portainer) na tua máquina e avisa-me se der algum erro de build.
 - `mem_limit: 1g` e `shm_size: 1gb` no compose são um ponto de partida
   — o Chromium é pesado; ajusta consoante o hardware do teu home
   server e quantos scrapes correm em paralelo (`_executor` em `api.py`
   está limitado a 2 workers em simultâneo por omissão).
 - A porta `8000` fica exposta no host; se o pipeline que vai chamar
-  isto correr no mesmo docker network, considera não publicar a porta
-  para fora e ligar os dois serviços pelo nome do serviço
-  (`flashscore-odds:8000`) dentro do mesmo `docker-compose.yml`/rede.
+  isto correr no mesmo docker network (ou na mesma stack do Portainer),
+  considera não publicar a porta para fora e ligar os dois serviços
+  pelo nome do serviço (`flashscore-odds:8000`) dentro da mesma rede
+  Docker — evita expor a API à rede local/Internet sem quereres.
 
 ## Se os seletores estiverem desatualizados
 
