@@ -183,9 +183,19 @@ def get_matches_for_date(page: Page, league_url: str, target_date: str, debug_di
     return matches
 
 
-def get_odds_markets(page: Page, match_id: str, delay: float, debug_dir: str = "") -> dict[str, list[dict]]:
-    """Abre a página de comparação de odds de um jogo e recolhe todos os
-    mercados disponíveis no menu de abas."""
+def get_odds_markets(
+    page: Page,
+    match_id: str,
+    delay: float,
+    debug_dir: str = "",
+    markets_filter: list[str] | None = None,
+) -> dict[str, list[dict]]:
+    """Abre a página de comparação de odds de um jogo e recolhe os mercados
+    disponíveis no menu de abas. Se markets_filter for dado, só são
+    recolhidos mercados cujo slug (a parte antes de "/" na chave, ex.
+    "1x2-tempo-completo") coincide exatamente ou começa por um dos valores
+    em markets_filter — permite pedir "1x2" e apanhar "1x2-tempo-completo"
+    sem teres de saber o slug exato usado pelo site."""
     odds_url = f"https://www.flashscore.pt/jogo/{match_id}/#/comparacao-de-odds/1x2-tempo-completo"
     log.info("  -> a abrir odds: %s", odds_url)
     page.goto(odds_url, wait_until="domcontentloaded", timeout=45000)
@@ -199,7 +209,7 @@ def get_odds_markets(page: Page, match_id: str, delay: float, debug_dir: str = "
         return {}
 
     market_links = page.locator(SELECTORS["odds_market_menu"])
-    markets: dict[str, tuple[str, str]] = {}
+    market_candidates: dict[str, tuple[str, str]] = {}
     for i in range(market_links.count()):
         link = market_links.nth(i)
         href = link.get_attribute("href") or ""
@@ -209,13 +219,25 @@ def get_odds_markets(page: Page, match_id: str, delay: float, debug_dir: str = "
         if not m:
             continue
         market_key = f"{m.group(1)}/{m.group(2)}"
-        markets[market_key] = (m.group(1), m.group(2))
+        market_candidates[market_key] = (m.group(1), m.group(2))
 
-    if not markets:
-        markets["1x2/tempo-completo"] = ("1x2-tempo-completo", "tempo-completo")
+    if not market_candidates:
+        market_candidates["1x2-tempo-completo/tempo-completo"] = ("1x2-tempo-completo", "tempo-completo")
+
+    if markets_filter:
+        wanted = [w.lower() for w in markets_filter]
+        market_candidates = {
+            key: value
+            for key, value in market_candidates.items()
+            if any(value[0].lower() == w or value[0].lower().startswith(w) for w in wanted)
+        }
+        if not market_candidates:
+            log.warning(
+                "  Nenhum mercado do jogo %s coincide com o filtro %s.", match_id, markets_filter
+            )
 
     results: dict[str, list[dict]] = {}
-    for market_key, (market, period) in markets.items():
+    for market_key, (market, period) in market_candidates.items():
         market_url = f"https://www.flashscore.pt/jogo/{match_id}/#/comparacao-de-odds/{market}/{period}"
         try:
             page.goto(market_url, wait_until="domcontentloaded", timeout=30000)
@@ -249,6 +271,7 @@ def scrape_league_odds(
     target_date: str,
     delay: float = 1.5,
     debug_dir: str = "",
+    markets: list[str] | None = None,
 ) -> dict:
     with sync_playwright() as p:
         browser = _launch_browser(p)
@@ -260,7 +283,7 @@ def scrape_league_odds(
         for idx, match in enumerate(matches, start=1):
             log.info("[%d/%d] %s vs %s (%s)", idx, len(matches), match.home, match.away, match.time)
             try:
-                match.odds = get_odds_markets(page, match.match_id, delay, debug_dir)
+                match.odds = get_odds_markets(page, match.match_id, delay, debug_dir, markets)
             except Exception as exc:  # não abortar tudo por causa de um jogo
                 log.error("  Falhou ao obter odds do jogo %s: %s", match.match_id, exc)
                 match.odds = {}
@@ -297,12 +320,18 @@ def main() -> int:
     parser.add_argument("--output", default="odds.json", help="Ficheiro JSON de saída")
     parser.add_argument("--delay", type=float, default=1.5, help="Segundos de espera entre pedidos")
     parser.add_argument("--debug", action="store_true", help="Gravar HTML das páginas visitadas para debug")
+    parser.add_argument(
+        "--markets",
+        default="",
+        help="Lista de mercados a extrair separados por vírgula (ex: '1x2,mais-menos'). Vazio = todos.",
+    )
     args = parser.parse_args()
 
     debug_dir = "debug_html" if args.debug else ""
+    markets = [m.strip() for m in args.markets.split(",") if m.strip()] or None
 
     try:
-        data = scrape_league_odds(args.league_url, args.date, args.delay, debug_dir)
+        data = scrape_league_odds(args.league_url, args.date, args.delay, debug_dir, markets)
     except RuntimeError as exc:
         log.error(str(exc))
         return 1
